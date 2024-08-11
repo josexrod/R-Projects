@@ -1,0 +1,177 @@
+---
+title: "Proyecto Final Modulo IV"
+author: "José de Jesús Rodríguez Barreto"
+date: "20/05/2020"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+## Introducción
+
+Las redes neuronales son un método de cálculo que busca imitar el funcionamiento de las neuronas en un organismo, con unidades conectadas entre si que generan y refuerzan conceptos para llegar a conclusiones, en este proyecto se busca usar las cualidades de las redes neuronales para hacer un modelo de prediccion sobre la precipitacion en una zona determinada de la republica.
+
+## Trabajando con los datos
+
+Nuestra base de datos original es una con 7 variables las cuales son fecha, precipitación, temperatura media, temperatura máxima, temperatura minima, evaporación y municipio, en las fechas tenemos fechas desde el siglo pasado las cuales no son relevantes para nuestro estudio por lo que hay que desecharlas como se hace en la siguiente linea de código:
+```{r}
+library(tidyverse)
+library(skimr)
+library(naniar)
+library(visdat)
+library(simputation)
+library(readxl)
+BasePrec<-read_excel("BasePrec.xlsx",col_types = c("date", 
+    "numeric", "numeric", "numeric", "numeric", 
+    "numeric", "text"))
+BasePrec<-BasePrec[BasePrec$fecha>="2020-01-01",]
+```
+
+Con esto dejamos solo las fechas a partir del 2020 reduciendo la base de datos de 120 mil entradas a solo 4285 pero el siguiente probelma a resolver es el de los datos faltantes ya que nuestra base de datos cuenta con varios como se puede ver a continuación:
+
+```{r}
+apply(is.na(BasePrec), 2, sum)
+```
+
+Para poder resolver como imputar los datos faltantes analizamos los datos que tenemos
+```{r}
+skim(BasePrec)
+```
+
+Como los datos estan algo sesgados entontces usaremos la mediana en lugar de la media para completar los datos faltantes usando las siguientes lineas de codigo:
+
+```{r}
+nn<-impute_median_all(BasePrec)
+apply(is.na(BasePrec), 2, sum) #comprobamos que ya no existan valores faltantes
+```
+
+Ya que imputamos los datos, entonces es tiempo de reducir las fechas a 4 valores que serán las estaciones del año, primavera, verano, otoño e invierno:
+
+```{r}
+Fecha<-if_else(nn$fecha<"2020-03-19","Invierno",
+        if_else(nn$fecha<"2020-06-20","Primavera",
+                if_else(nn$fecha<"2020-09-22","Verano",
+                        if_else(nn$fecha<"2020-12-21","Otoño",
+                                if_else(nn$fecha<"2021-03-20","Invierno",
+                                        if_else(nn$fecha<"2021-06-20","Primavera",
+                                                if_else(nn$fecha<"2021-09-22","Verano",
+                                                        if_else(nn$fecha<"2021-12-21","Otoño",
+                                                                if_else(nn$fecha<"2022-03-20","Invierno","Primavera")))))))))
+
+nn$fecha<-Fecha
+
+```
+
+
+Ahora convertimos a factores las variables que contienen texto y posteriormente todas las unidades a numéricas lo que hará que los factores tomen valores entre 1 y 4 en las fechas y entre 1 y 5 en los municipios quedando los valores de la siguiente forma: en fechas invierno=1, otoño=2, primavera=3, verano=4, en los municipios Actopan=1, Cuautitlán Izcalli=2, Ixmiquilpan=3, Jilotepec=4, Tepetitlán=5. Ahora solo queda escalar los datos de manera que el mínimo sea 0 y el máximo 1 y con esto nuestra base de datos esta lista para entrar en la red neuronal.
+
+```{r}
+#Para escalar usaremos la siguiente función
+min.max<-function(v)
+{
+  return((v-min(v))/(max(v)-min(v)))
+}
+```
+
+
+```{r}
+nn<-mutate_at(nn,c("fecha","municipio"),as.factor)
+nn<-mutate_at(nn,c("fecha","municipio"),as.numeric)
+max.prec<-max(nn$precipitacion)
+min.prec<-min(nn$precipitacion)#estas variables las usaremos para reescalar la variable a su valor original
+nn<-mutate_all(nn,min.max)
+str(nn)
+
+```
+
+## Red Neuronal
+
+Para nuestra red neuronal usamos una librería de r llamada neural net la cual nos da un toolbox al cual ingresar nuestros datos arrojándonos el modelo por si sola.
+```{r}
+library(neuralnet)
+```
+
+Antes de meter los datos en la toolbox separamos nuestra base de datos en dos sets uno de entrenamiento y uno de prueba, en el de entrenamiento pondremos el 80% de nuestras entradas y en el de prueba el 20% restante
+
+```{r}
+N<-dim(nn)[1]
+
+id.train<-sample(1:N,0.8*N)
+id.test<-setdiff(1:N,id.train)
+
+set.train<-nn[id.train,]
+set.test<-nn[id.test,]
+```
+
+Ahora ingresamos el set de entrenamiento en la toolbox para esto tenemos que elegir que clase de modelo preferimos, en nuestro caso usaremos precipitacion~. El cual nos dice que nuestra resultante es igual a la suma de todas las variables, como una combinación lineal, ahora elegimos el numero de capas ocultas en nuestro caso se eligió 7,6 y5
+
+```{r}
+precipitacion.modelo<-neuralnet(precipitacion ~., set.train, 
+                         hidden = c(7,6,5), 
+                         err.fct = "sse",
+                         linear.output = TRUE
+)
+
+```
+
+
+Ahora lo que sigue es probar nuestra red neuronal con el set de prueba poniéndola a hacer predicciones con este
+
+```{r}
+modelo_resultados<-predict(precipitacion.modelo,set.test)
+pred<-modelo_resultados*(max.prec - min.prec) + min.prec 
+prec_test<-set.test$precipitacion*(max.prec - min.prec) + min.prec 
+head(pred)
+```
+
+Ya hechas las predicciones, calculamos el índice de error que tienen estas, en nuestro caso al ser un problema de tipo regresión usamos 3 opciones, el error cuadrático medio, la raíz del error cuadrático medio y el error absoluto medio.
+```{r}
+mean((pred-prec_test)^2)           # Este es el error cuadrático medio
+(mean((pred-prec_test)^2))^(1/2)      # Esta es la raíz cuadrada del error cuadrático medio
+mean(abs(pred-prec_test)) 
+```
+
+Con la medida de los errores podemos concluir si nuestro modelo nos es útil o hay que trabajar de nuevo en él, en nuestro caso, el modelo tiene un error en las precipitaciones bajo lo cual nos dice que se puede trabajar con este modelo.
+
+## Conclusiones
+
+En conclusión la red neuronal nos puede ayudar para obtener predicciones, que aunque con cierto rango de error, nos ayuden a ver que tan grande sera la precipitación dependiendo de la zona, la epoca del año y la temperatura, esto nos puede ayudar a saber que tanto se van a recargar a lo largo del año los mantos acuiferos de la zona.
+
+## Anexo
+
+### Diagrama de Flujo
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Plot Red Neuronal
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
